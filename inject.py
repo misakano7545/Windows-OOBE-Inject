@@ -9,8 +9,8 @@ import sys
 class BatRunnerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Bat 脚本执行器")
-        self.root.geometry("800x600")
+        self.root.title("Inject")
+        self.root.geometry("600x600")
         self.root.minsize(600, 400)
 
         self.lines = []
@@ -26,16 +26,6 @@ class BatRunnerApp:
         self.root.after(100, self._auto_load_and_run)
 
     def _build_ui(self):
-        toolbar = ttk.Frame(self.root, padding=5)
-        toolbar.pack(fill=tk.X)
-
-        ttk.Button(toolbar, text="重新执行", command=self._run).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(toolbar, text="停止", command=self._stop).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(toolbar, text="清空", command=self._clear).pack(side=tk.LEFT)
-
-        self.file_label = ttk.Label(toolbar, text=f"inject.txt", foreground="black")
-        self.file_label.pack(side=tk.LEFT, padx=15)
-
         container = ttk.Frame(self.root)
         container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -147,7 +137,8 @@ class BatRunnerApp:
             self.root.after(0, self._update_progress, idx + 1, total)
 
         self.running = False
-        self.root.after(0, lambda: self.status_var.set("执行完成"))
+        self.root.after(0, lambda: self.status_var.set("执行完成，即将退出..."))
+        self.root.after(1500, self.root.destroy)
 
     def _highlight_row(self, item_id):
         self.tree.selection_set(item_id)
@@ -168,16 +159,6 @@ class BatRunnerApp:
 
     def _stop(self):
         self.running = False
-        self.status_var.set("已停止")
-
-    def _clear(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        self.lines = []
-        self.progress["value"] = 0
-        self._set_output("")
-        self.file_label.config(text="inject.txt", foreground="black")
-        self.status_var.set("已清空")
 
     def _set_output(self, text):
         self.output_text.config(state=tk.NORMAL)

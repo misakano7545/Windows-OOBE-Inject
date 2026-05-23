@@ -1,0 +1,8 @@
+echo Hello World
+dir .
+mkdir test_folder_12345
+echo test content > test_folder_12345\test.txt
+type test_folder_12345\test.txt
+rmdir /s /q test_folder_12345
+invalid_command_xyz
+echo Done

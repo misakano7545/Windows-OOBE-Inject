@@ -4,6 +4,9 @@ import subprocess
 import threading
 import os
 import sys
+import locale
+
+COMMAND_TIMEOUT = 300
 
 
 class BatRunnerApp:
@@ -16,6 +19,8 @@ class BatRunnerApp:
         self.lines = []
         self.running = False
         self.current_row = -1
+        self.has_failure = False
+        self.encoding = locale.getpreferredencoding(False) or "utf-8"
         if getattr(sys, 'frozen', False):
             self.script_dir = os.path.dirname(sys.executable)
         else:
@@ -23,7 +28,25 @@ class BatRunnerApp:
         self.inject_path = os.path.join(self.script_dir, "inject.txt")
 
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._auto_load_and_run)
+
+    def _on_close(self):
+        self.running = False
+        self._safe_destroy()
+
+    def _safe_after(self, delay, func, *args):
+        try:
+            if self.root.winfo_exists():
+                self.root.after(delay, func, *args)
+        except tk.TclError:
+            pass
+
+    def _safe_destroy(self):
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
     def _build_ui(self):
         container = ttk.Frame(self.root)
@@ -61,16 +84,26 @@ class BatRunnerApp:
             self.status_var.set(f"未找到 inject.txt: {self.inject_path}")
             return False
 
-        with open(self.inject_path, "r", encoding="gbk", errors="replace") as f:
-            self.lines = f.readlines()
+        try:
+            with open(self.inject_path, "r", encoding=self.encoding, errors="replace") as f:
+                self.lines = f.readlines()
+        except OSError as e:
+            self.status_var.set(f"读取失败: {e}")
+            return False
 
         for item in self.tree.get_children():
             self.tree.delete(item)
 
         for i, line in enumerate(self.lines, 1):
             stripped = line.strip()
-            if stripped and not stripped.startswith("@") and not stripped.lower().startswith("rem"):
-                self.tree.insert("", tk.END, iid=str(i), values=("⏳", stripped))
+            if not stripped:
+                continue
+            if stripped.startswith("@") or stripped.startswith("::"):
+                continue
+            first_word = stripped.split(None, 1)[0].lower()
+            if first_word == "rem":
+                continue
+            self.tree.insert("", tk.END, iid=str(i), values=("⏳", stripped))
 
         self.progress["value"] = 0
         self.status_var.set(f"已加载 inject.txt，共 {len(self.lines)} 行")
@@ -87,30 +120,36 @@ class BatRunnerApp:
             self.status_var.set("inject.txt 为空或未加载")
             return
 
+        items = self.tree.get_children()
+        if not items:
+            self.status_var.set("没有可执行的命令")
+            return
+
+        tasks = []
+        for item_id in items:
+            values = self.tree.item(item_id, "values")
+            tasks.append((item_id, values[1]))
+            self.tree.item(item_id, values=("⏳", *values[1:]))
+
         self.running = True
+        self.has_failure = False
         self.current_row = -1
         self._set_output("")
 
-        for item in self.tree.get_children():
-            self.tree.item(item, values=(self.tree.item(item, "values")[0].replace("✅", "⏳").replace("❌", "⏳"), *self.tree.item(item, "values")[1:]))
-
-        total = len(self.tree.get_children())
+        total = len(tasks)
         self.progress["maximum"] = total
         self.progress["value"] = 0
 
-        threading.Thread(target=self._execute, daemon=True).start()
+        threading.Thread(target=self._execute, args=(tasks,), daemon=True).start()
 
-    def _execute(self):
-        items = self.tree.get_children()
-        total = len(items)
+    def _execute(self, tasks):
+        total = len(tasks)
 
-        for idx, item_id in enumerate(items):
+        for idx, (item_id, command) in enumerate(tasks):
             if not self.running:
                 break
 
-            values = self.tree.item(item_id, "values")
-            command = values[1]
-            self.root.after(0, self._highlight_row, item_id)
+            self._safe_after(0, self._highlight_row, item_id, command)
 
             try:
                 result = subprocess.run(
@@ -118,40 +157,54 @@ class BatRunnerApp:
                     shell=True,
                     capture_output=True,
                     text=True,
-                    encoding="gbk",
+                    encoding=self.encoding,
                     errors="replace",
-                    timeout=60,
+                    timeout=COMMAND_TIMEOUT,
                     cwd=self.script_dir,
                 )
                 success = result.returncode == 0
-                output = result.stdout + result.stderr
+                output = (result.stdout or "") + (result.stderr or "")
             except subprocess.TimeoutExpired:
                 success = False
-                output = "执行超时（60秒）"
+                output = f"执行超时（{COMMAND_TIMEOUT}秒）"
             except Exception as e:
                 success = False
                 output = str(e)
 
+            if not success:
+                self.has_failure = True
+
             status_icon = "✅" if success else "❌"
-            self.root.after(0, self._update_row, item_id, status_icon, output)
-            self.root.after(0, self._update_progress, idx + 1, total)
+            self._safe_after(0, self._update_row, item_id, command, status_icon, output)
+            self._safe_after(0, self._update_progress, idx + 1, total)
 
         self.running = False
-        self.root.after(0, lambda: self.status_var.set("执行完成，即将退出..."))
-        self.root.after(1500, self.root.destroy)
+        self._safe_after(0, self._finalize)
 
-    def _highlight_row(self, item_id):
+    def _finalize(self):
+        if self.has_failure:
+            self.status_var.set("执行完成（含失败项），10 秒后退出")
+            self._safe_after(10000, self._safe_destroy)
+        else:
+            self.status_var.set("执行完成，即将退出...")
+            self._safe_after(1500, self._safe_destroy)
+
+    def _highlight_row(self, item_id, command):
+        if not self.tree.exists(item_id):
+            return
         self.tree.selection_set(item_id)
         self.tree.see(item_id)
         values = self.tree.item(item_id, "values")
         self.tree.item(item_id, values=("▶", *values[1:]))
-        self.status_var.set(f"正在执行: {values[1]}")
+        self.status_var.set(f"正在执行: {command}")
 
-    def _update_row(self, item_id, status_icon, output):
+    def _update_row(self, item_id, command, status_icon, output):
+        if not self.tree.exists(item_id):
+            return
         values = self.tree.item(item_id, "values")
         self.tree.item(item_id, values=(status_icon, *values[1:]))
         if output.strip():
-            self._append_output(f"{values[1]}\n{output.strip()}\n{'─' * 40}\n")
+            self._append_output(f"{command}\n{output.strip()}\n{'─' * 40}\n")
 
     def _update_progress(self, current, total):
         self.progress["value"] = current
